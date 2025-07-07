@@ -1,46 +1,74 @@
-import requests
-import time
-import hmac
-import hashlib
+import aiohttp
+import asyncio
+from datetime import datetime
 
-API_KEY = "048978b32d41f1c2760696de00d61bc0d3973a1815379628fc3dd6bda9933776"
-API_SECRET = "617c1100573da9820ce0f47dd4d3928c8db39251e7cc3997409711f92fff61f1a5580c1bec3db28f6eb89b523fb1b31446f394c97bab575dcc9ed876de751ab8"
-BASE_URL = "https://api.bitvavo.com/v2"
+# إعدادات تيليغرام
+BOT_TOKEN = "8050663945:AAEv3uHFTsAwH_Nw6HEgMkfJWkxFhNfLoKk"
+CHAT_ID = "7104122953"
 
-def get_server_time():
-    r = requests.get(BASE_URL + "/time")
-    return str(r.json()["time"])
+# إرسال رسالة تيليغرام
+async def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": text}
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
 
-def sign_request(method, path, body=""):
-    timestamp = get_server_time()
-    message = timestamp + method + "/" + path + body
-    signature = hmac.new(
-        API_SECRET.encode('utf-8'),
-        message.encode('utf-8'),
-        hashlib.sha256
-    ).hexdigest()
-    return {
-        "Bitvavo-Access-Key": API_KEY,
-        "Bitvavo-Access-Signature": signature,
-        "Bitvavo-Access-Timestamp": timestamp,
-        "Bitvavo-Access-Window": "10000",
-        "Content-Type": "application/json"
-    }
+# جلب أفضل 150 عملة USDT من حيث الحجم
+async def get_top_usdt_symbols():
+    url = "https://api.binance.com/api/v3/ticker/24hr"
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            data = await resp.json()
+    usdt_pairs = []
+    for item in data:
+        symbol = item.get('symbol', '')
+        if symbol.endswith('USDT') and not symbol.endswith('BUSD'):
+            usdt_pairs.append(item)
+    sorted_pairs = sorted(usdt_pairs, key=lambda x: -float(x['quoteVolume']))
+    return [pair['symbol'] for pair in sorted_pairs[:150]]
 
-def get_markets():
-    url = BASE_URL + "/markets"
-    headers = sign_request("GET", "markets")
-    r = requests.get(url, headers=headers)
-    return r.json()
+# المتابعة اللحظية لكل عملة
+symbol_data = {}
 
-if __name__ == "__main__":
-    markets = get_markets()
-    print(markets)  # ð ÙØ¹Ø±Ø¶ Ø´ÙÙ Ø§ÙØ¨ÙØ§ÙØ§Øª
-    if isinstance(markets, list):
-        for m in markets:
-            if isinstance(m, dict) and "market" in m:
-                print(m["market"])
+async def analyze_symbol(symbol):
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as resp:
+                    res = await resp.json()
+            price = float(res['price'])
+            now = datetime.utcnow()
+
+            if symbol not in symbol_data:
+                symbol_data[symbol] = {"start_time": now, "start_price": price}
             else:
-                print("â Ø¹ÙØµØ± ØºÙØ± ÙØªÙÙØ¹:", m)
-    else:
-        print("â Ø§ÙØ±Ø¯ ÙÙØ³ ÙØ§Ø¦ÙØ©:", type(markets), markets)
+                start = symbol_data[symbol]["start_time"]
+                old_price = symbol_data[symbol]["start_price"]
+                diff = ((price - old_price) / old_price) * 100
+                elapsed = (now - start).total_seconds()
+
+                if 15 <= elapsed <= 20 and 1 <= diff < 3:
+                    await send_telegram_message(f"🚨 حركة غير عادية في {symbol} 📈")
+                    symbol_data[symbol] = {"start_time": now, "start_price": price}
+
+                elif elapsed <= 60 and diff >= 3:
+                    await send_telegram_message(f"🎯 تم قنص عملة {symbol} 💥")
+                    symbol_data[symbol] = {"start_time": now, "start_price": price}
+
+            await asyncio.sleep(15)
+
+        except Exception as e:
+            print(f"❌ خطأ في {symbol}: {e}")
+            await asyncio.sleep(5)
+
+# تشغيل الكل
+async def main():
+    await send_telegram_message("✅ تم تشغيل بوت صقر لتحليل السوق 🔍")
+    symbols = await get_top_usdt_symbols()
+    tasks = [analyze_symbol(symbol) for symbol in symbols]
+    await asyncio.gather(*tasks)
+
+# بداية البرنامج
+if __name__ == "__main__":
+    asyncio.run(main())
